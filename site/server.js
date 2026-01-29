@@ -9,12 +9,8 @@ const PORT = process.env.PORT || 3000;
 const DB_FILE = path.join(__dirname, 'db.json');
 const USE_FIRESTORE = String(process.env.USE_FIRESTORE || '').toLowerCase() === 'true';
 const FIRESTORE_DB_DOC = process.env.FIRESTORE_DB_DOC || 'db/main';
-const USE_RTDB = String(process.env.USE_RTDB || '').toLowerCase() === 'true';
-const RTDB_DB_PATH = process.env.RTDB_DB_PATH || 'db/main';
-const DATABASE_URL = process.env.DATABASE_URL || '';
 
 let firestore = null;
-let rtdb = null;
 
 function initFirestore() {
   if (!USE_FIRESTORE) return null;
@@ -37,13 +33,10 @@ function initFirestore() {
   try {
     if (admin.apps.length === 0) {
       if (serviceAccount) {
-        admin.initializeApp({
-          credential: admin.credential.cert(serviceAccount),
-          ...(DATABASE_URL ? { databaseURL: DATABASE_URL } : {})
-        });
+        admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
       } else {
         // Permite usar GOOGLE_APPLICATION_CREDENTIALS / ambiente do provedor se existir
-        admin.initializeApp(DATABASE_URL ? { databaseURL: DATABASE_URL } : undefined);
+        admin.initializeApp();
       }
     }
     firestore = admin.firestore();
@@ -52,51 +45,6 @@ function initFirestore() {
   } catch (e) {
     console.error('❌ Falha ao inicializar Firebase Admin/Firestore:', e);
     firestore = null;
-    return null;
-  }
-}
-
-function initRtdb() {
-  if (!USE_RTDB) return null;
-  if (rtdb) return rtdb;
-
-  const jsonRaw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  const b64Raw = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
-
-  let serviceAccount = null;
-  try {
-    if (jsonRaw) {
-      serviceAccount = JSON.parse(jsonRaw);
-    } else if (b64Raw) {
-      serviceAccount = JSON.parse(Buffer.from(b64Raw, 'base64').toString('utf8'));
-    }
-  } catch (e) {
-    console.error('Erro ao parsear credenciais do Firebase (JSON/BASE64):', e);
-  }
-
-  try {
-    if (admin.apps.length === 0) {
-      if (serviceAccount) {
-        admin.initializeApp({
-          credential: admin.credential.cert(serviceAccount),
-          ...(DATABASE_URL ? { databaseURL: DATABASE_URL } : {})
-        });
-      } else {
-        // Permite usar GOOGLE_APPLICATION_CREDENTIALS / ambiente do provedor se existir
-        admin.initializeApp(DATABASE_URL ? { databaseURL: DATABASE_URL } : undefined);
-      }
-    }
-
-    if (!DATABASE_URL) {
-      console.warn('⚠️ USE_RTDB=true mas DATABASE_URL está vazio. Ex: https://<project>-default-rtdb.firebaseio.com');
-    }
-
-    rtdb = admin.database();
-    console.log('✅ Realtime Database habilitado:', RTDB_DB_PATH);
-    return rtdb;
-  } catch (e) {
-    console.error('❌ Falha ao inicializar Firebase Admin/RTDB:', e);
-    rtdb = null;
     return null;
   }
 }
@@ -112,62 +60,6 @@ function safe(v) {
 
 async function loadDB() {
   try {
-    const dbClient = initRtdb();
-    if (dbClient) {
-      const snap = await dbClient.ref(RTDB_DB_PATH).once('value');
-      const data = snap.exists() ? (snap.val() || {}) : {};
-      const db = {
-        users: Array.isArray(data.users) ? data.users : [],
-        apps: Array.isArray(data.apps) ? data.apps : [],
-        keys: Array.isArray(data.keys) ? data.keys : [],
-        resellers: Array.isArray(data.resellers) ? data.resellers : []
-      };
-
-      // Migração/normalização
-      const now = Date.now();
-      db.keys.forEach(k => {
-        if (typeof k.durationMs !== 'number') {
-          const ms = parseDurMs(k.durationInput);
-          k.durationMs = ms == null ? 0 : ms;
-        }
-        if (typeof k.remainingMs !== 'number') {
-          if (k.firstUsedAt) {
-            const legacyExpires = k.expiresAt ? new Date(k.expiresAt).getTime() : null;
-            const rem = legacyExpires == null ? Math.max(0, k.durationMs) : Math.max(0, legacyExpires - now);
-            k.remainingMs = rem;
-            k.startedAt = k.startedAt || k.firstUsedAt;
-            k.lastTickAt = k.lastTickAt || nowIso();
-          } else {
-            k.remainingMs = k.durationMs;
-            k.startedAt = null;
-            k.lastTickAt = null;
-          }
-        }
-        if (typeof k.pausedByApp !== 'boolean') k.pausedByApp = false;
-      });
-
-      // Garante Secret ID
-      let dbChanged = false;
-      db.users.forEach(u => {
-        if (typeof u.secretId !== 'string' || !u.secretId) {
-          const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-          let secretId = '';
-          for (let i = 0; i < 15; i++) {
-            secretId += chars.charAt(Math.floor(Math.random() * chars.length));
-          }
-          u.secretId = secretId;
-          dbChanged = true;
-        }
-        if (typeof u.secretLastUsedAt !== 'string') u.secretLastUsedAt = null;
-      });
-
-      if (dbChanged) {
-        await saveDB(db);
-      }
-
-      return db;
-    }
-
     const fsDb = initFirestore();
     if (fsDb) {
       const [col, doc] = safe(FIRESTORE_DB_DOC).split('/');
@@ -288,18 +180,6 @@ async function loadDB() {
 
 async function saveDB(db) {
   try {
-    const dbClient = initRtdb();
-    if (dbClient) {
-      await dbClient.ref(RTDB_DB_PATH).set({
-        users: Array.isArray(db.users) ? db.users : [],
-        apps: Array.isArray(db.apps) ? db.apps : [],
-        keys: Array.isArray(db.keys) ? db.keys : [],
-        resellers: Array.isArray(db.resellers) ? db.resellers : [],
-        updatedAt: nowIso()
-      });
-      return true;
-    }
-
     const fsDb = initFirestore();
     if (fsDb) {
       const [col, doc] = safe(FIRESTORE_DB_DOC).split('/');
@@ -1324,11 +1204,11 @@ server.listen(PORT, () => {
   console.log(`API de validação: http://localhost:${PORT}/api/validate`);
   
   // Inicializa db.json se não existir
-  if (!USE_FIRESTORE && !USE_RTDB && !fs.existsSync(DB_FILE)) {
+  if (!USE_FIRESTORE && !fs.existsSync(DB_FILE)) {
     const initialDB = { users: [], apps: [], keys: [], resellers: [] };
     saveDB(initialDB);
     console.log('db.json criado com sucesso');
-  } else if (!USE_FIRESTORE && !USE_RTDB) {
+  } else if (!USE_FIRESTORE) {
     // Verifica e corrige Secret IDs ao iniciar
     loadDB().then(db => {
       let changed = false;
