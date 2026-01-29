@@ -57,21 +57,52 @@ function initFirestore() {
 }
 
 function initRtdb() {
-  if (!USE_RTDB) return null;
+  if (!USE_RTDB) {
+    console.log('ℹ️ RTDB desabilitado (USE_RTDB não está true)');
+    return null;
+  }
   if (rtdb) return rtdb;
+
+  console.log('🔧 Inicializando Firebase Realtime Database...');
+  console.log('   DATABASE_URL:', DATABASE_URL || '(não definido)');
+  console.log('   RTDB_DB_PATH:', RTDB_DB_PATH);
 
   const jsonRaw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
   const b64Raw = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
+  const credsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
 
   let serviceAccount = null;
+  let credSource = '';
+
+  // Tenta pegar credenciais de diferentes fontes
   try {
     if (jsonRaw) {
       serviceAccount = JSON.parse(jsonRaw);
+      credSource = 'FIREBASE_SERVICE_ACCOUNT_JSON';
+      console.log('   ✅ Credenciais encontradas via FIREBASE_SERVICE_ACCOUNT_JSON');
     } else if (b64Raw) {
-      serviceAccount = JSON.parse(Buffer.from(b64Raw, 'base64').toString('utf8'));
+      const decoded = Buffer.from(b64Raw, 'base64').toString('utf8');
+      serviceAccount = JSON.parse(decoded);
+      credSource = 'FIREBASE_SERVICE_ACCOUNT_BASE64';
+      console.log('   ✅ Credenciais encontradas via FIREBASE_SERVICE_ACCOUNT_BASE64');
+    } else if (credsPath && fs.existsSync(credsPath)) {
+      const fileContent = fs.readFileSync(credsPath, 'utf8');
+      serviceAccount = JSON.parse(fileContent);
+      credSource = 'GOOGLE_APPLICATION_CREDENTIALS';
+      console.log('   ✅ Credenciais encontradas via arquivo:', credsPath);
+    } else {
+      console.warn('   ⚠️ Nenhuma credencial encontrada. Tentando inicializar sem credenciais...');
     }
   } catch (e) {
-    console.error('Erro ao parsear credenciais do Firebase (JSON/BASE64):', e);
+    console.error('   ❌ Erro ao parsear credenciais:', e.message);
+    console.error('   Fonte tentada:', credSource || 'nenhuma');
+    return null;
+  }
+
+  if (!DATABASE_URL) {
+    console.error('   ❌ DATABASE_URL não está definido!');
+    console.error('   Configure: DATABASE_URL=https://lunarauth-898e9-default-rtdb.firebaseio.com');
+    return null;
   }
 
   try {
@@ -79,23 +110,25 @@ function initRtdb() {
       if (serviceAccount) {
         admin.initializeApp({
           credential: admin.credential.cert(serviceAccount),
-          ...(DATABASE_URL ? { databaseURL: DATABASE_URL } : {})
+          databaseURL: DATABASE_URL
         });
+        console.log('   ✅ Firebase Admin inicializado com credenciais');
       } else {
-        // Permite usar GOOGLE_APPLICATION_CREDENTIALS / ambiente do provedor se existir
-        admin.initializeApp(DATABASE_URL ? { databaseURL: DATABASE_URL } : undefined);
+        // Tenta sem credenciais (pode funcionar em alguns ambientes)
+        admin.initializeApp({ databaseURL: DATABASE_URL });
+        console.log('   ⚠️ Firebase Admin inicializado SEM credenciais (pode falhar)');
       }
-    }
-
-    if (!DATABASE_URL) {
-      console.warn('⚠️ USE_RTDB=true mas DATABASE_URL está vazio. Ex: https://<project>-default-rtdb.firebaseio.com');
+    } else {
+      console.log('   ℹ️ Firebase Admin já estava inicializado');
     }
 
     rtdb = admin.database();
-    console.log('✅ Realtime Database habilitado:', RTDB_DB_PATH);
+    console.log('   ✅ Realtime Database conectado com sucesso!');
+    console.log('   📍 Path:', RTDB_DB_PATH);
     return rtdb;
   } catch (e) {
-    console.error('❌ Falha ao inicializar Firebase Admin/RTDB:', e);
+    console.error('   ❌ Falha ao inicializar Firebase Admin/RTDB:', e.message);
+    console.error('   Stack:', e.stack);
     rtdb = null;
     return null;
   }
@@ -1320,14 +1353,33 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Servidor LunarAuth rodando em http://localhost:${PORT}`);
-  console.log(`API de validação: http://localhost:${PORT}/api/validate`);
+  console.log('');
+  console.log('═══════════════════════════════════════════════════════');
+  console.log('🚀 Servidor qioAuth iniciado com sucesso!');
+  console.log('═══════════════════════════════════════════════════════');
+  console.log(`📍 URL: http://localhost:${PORT}`);
+  console.log(`🔗 API de validação: http://localhost:${PORT}/api/validate`);
+  console.log(`📊 Dashboard: http://localhost:${PORT}/dashboard.html`);
+  console.log('');
   
-  // Inicializa db.json se não existir
+  // Mostra status do banco de dados
+  if (USE_RTDB) {
+    console.log('💾 Banco de dados: Firebase Realtime Database');
+    console.log(`   Path: ${RTDB_DB_PATH}`);
+    console.log(`   URL: ${DATABASE_URL || '(não definido)'}`);
+  } else if (USE_FIRESTORE) {
+    console.log('💾 Banco de dados: Firestore');
+    console.log(`   Document: ${FIRESTORE_DB_DOC}`);
+  } else {
+    console.log('💾 Banco de dados: Arquivo local (db.json)');
+  }
+  console.log('');
+  
+  // Inicializa db.json se não existir (só se não estiver usando Firebase)
   if (!USE_FIRESTORE && !USE_RTDB && !fs.existsSync(DB_FILE)) {
     const initialDB = { users: [], apps: [], keys: [], resellers: [] };
     saveDB(initialDB);
-    console.log('db.json criado com sucesso');
+    console.log('✅ db.json criado com sucesso');
   } else if (!USE_FIRESTORE && !USE_RTDB) {
     // Verifica e corrige Secret IDs ao iniciar
     loadDB().then(db => {
@@ -1341,14 +1393,31 @@ server.listen(PORT, () => {
           }
           u.secretId = secretId;
           changed = true;
-          console.log(`Secret ID gerado para usuário: ${u.username || u.email}`);
+          console.log(`   Secret ID gerado para usuário: ${u.username || u.email}`);
         }
       });
       if (changed) {
         saveDB(db);
-        console.log('Secret IDs corrigidos no banco de dados');
+        console.log('✅ Secret IDs corrigidos no banco de dados');
       }
-    }).catch(e => console.error('Erro ao validar Secret IDs no boot:', e));
+    }).catch(e => console.error('❌ Erro ao validar Secret IDs no boot:', e));
+  }
+  
+  console.log('═══════════════════════════════════════════════════════');
+  console.log('');
+  
+  // Testa conexão com RTDB se estiver habilitado
+  if (USE_RTDB) {
+    setTimeout(async () => {
+      try {
+        const db = await loadDB();
+        console.log('✅ Teste de conexão RTDB: OK');
+        console.log(`   Usuários: ${db.users.length}, Apps: ${db.apps.length}, Keys: ${db.keys.length}`);
+      } catch (e) {
+        console.error('❌ Erro ao testar conexão RTDB:', e.message);
+        console.error('   Verifique as variáveis de ambiente no Render!');
+      }
+    }, 1000);
   }
 });
 
