@@ -323,13 +323,16 @@ async function saveDB(db) {
   try {
     const dbClient = initRtdb();
     if (dbClient) {
-      await dbClient.ref(RTDB_DB_PATH).set({
+      const dataToSave = {
         users: Array.isArray(db.users) ? db.users : [],
         apps: Array.isArray(db.apps) ? db.apps : [],
         keys: Array.isArray(db.keys) ? db.keys : [],
         resellers: Array.isArray(db.resellers) ? db.resellers : [],
         updatedAt: nowIso()
-      });
+      };
+      console.log(`[saveDB] Salvando no RTDB (${RTDB_DB_PATH}): ${dataToSave.users.length} users, ${dataToSave.apps.length} apps, ${dataToSave.keys.length} keys`);
+      await dbClient.ref(RTDB_DB_PATH).set(dataToSave);
+      console.log('[saveDB] ✅ Dados salvos no RTDB com sucesso!');
       return true;
     }
 
@@ -1264,34 +1267,56 @@ const server = http.createServer((req, res) => {
     return;
   }
   
-  // API para salvar db.json (usado pelo dashboard quando em localhost)
+  // API para salvar db.json (usado pelo dashboard/frontend)
   if (parsedUrl.pathname === '/db.json' && req.method === 'POST') {
     let body = '';
     req.on('data', chunk => { body += chunk.toString(); });
     req.on('end', () => {
       (async () => {
         try {
-        const db = JSON.parse(body);
-        // Garante que todos os usuários têm Secret ID
-        db.users.forEach(u => {
-          if (typeof u.secretId !== 'string' || !u.secretId) {
-            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-            let secretId = '';
-            for (let i = 0; i < 15; i++) {
-              secretId += chars.charAt(Math.floor(Math.random() * chars.length));
+          console.log('[POST /db.json] Recebendo dados para salvar...');
+          const db = JSON.parse(body);
+          
+          // Garante que todos os usuários têm Secret ID
+          let usersChanged = false;
+          db.users.forEach(u => {
+            if (typeof u.secretId !== 'string' || !u.secretId) {
+              const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+              let secretId = '';
+              for (let i = 0; i < 15; i++) {
+                secretId += chars.charAt(Math.floor(Math.random() * chars.length));
+              }
+              u.secretId = secretId;
+              usersChanged = true;
             }
-            u.secretId = secretId;
+          });
+          
+          // Normaliza arrays
+          db.users = Array.isArray(db.users) ? db.users : [];
+          db.apps = Array.isArray(db.apps) ? db.apps : [];
+          db.keys = Array.isArray(db.keys) ? db.keys : [];
+          db.resellers = Array.isArray(db.resellers) ? db.resellers : [];
+          
+          console.log(`[POST /db.json] Salvando: ${db.users.length} users, ${db.apps.length} apps, ${db.keys.length} keys, ${db.resellers.length} resellers`);
+          
+          const saved = await saveDB(db);
+          if (!saved) {
+            console.error('[POST /db.json] ❌ Falha ao salvar no banco!');
+            res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+            res.end(JSON.stringify({ success: false, message: 'Erro ao salvar no banco de dados', code: 'SAVE_ERROR' }));
+            return;
           }
-        });
-        await saveDB(db);
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-        res.end(JSON.stringify({ success: true }));
+          
+          console.log('[POST /db.json] ✅ Dados salvos com sucesso!');
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(JSON.stringify({ success: true, message: 'Dados salvos com sucesso' }));
         } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-        res.end(JSON.stringify({ success: false, error: e.message }));
+          console.error('[POST /db.json] ❌ Erro ao processar:', e.message);
+          res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(JSON.stringify({ success: false, error: e.message }));
         }
       })().catch(e => {
-        console.error('[/db.json POST] erro:', e);
+        console.error('[/db.json POST] ❌ Erro não tratado:', e);
         res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
         res.end(JSON.stringify({ success: false, message: 'Erro interno', code: 'INTERNAL_ERROR' }));
       });
